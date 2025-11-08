@@ -31,8 +31,8 @@ from plotly.subplots import make_subplots
 def sicr_pf_model(
     t, y, N, beta_0, gamma, rho,
     alpha, delta0, compliance_max,
-    gamma_F, epsilon, phi,        # <- fatigue params
-    beta_floor=0.2                    # 20% floor on beta
+    gamma_F, epsilon, phi, omega, 
+    beta_floor=0.1 
 ):
     """
     SICR + PF (perceived risk and fatigue) with bounded, asymmetric dynamics:
@@ -44,31 +44,29 @@ def sicr_pf_model(
     S, I, C, R, P, F = y
 
     #Compliance and beta_eff (bounded to reflect real world)
-    compliance = np.clip(compliance_max * P, 0, 1)  # elementwise clamp in [0, 1]
+    compliance = compliance_max * (1 / (1 + np.exp(-8*(P - 0.5))))  # elementwise clamp in [0, 1]
 
     beta_min = beta_0 * beta_floor
     beta_eff = beta_min + (beta_0 - beta_min) * (1.0 - compliance)
-    beta_eff = np.clip(beta_eff, beta_min, beta_0)  # elementwise clamp in [beta_min, beta_0]
-
+    #beta_eff = np.clip(beta_eff, beta_min, beta_0)  # elementwise clamp in [beta_min, beta_0]
 
     #Infection force
     total_infected = I + C
-    incidence = beta_eff * S * total_infected / N
+    incidence = beta_eff * S * I / N
 
-    #Tiny seeding and waning immunity (could be a population replacement too)
+    # seeding and waning immunity
     eta   = 1e-8
-    omega = 1.0 / 180.0
 
     #SICR
     dSdt = -incidence + omega * R
-    dIdt = incidence - (gamma + rho) * I
+    dIdt = incidence - (gamma + rho) * total_infected
     dCdt = rho * I - gamma * C
     dRdt = gamma * (I + C) - omega * R
 
     #Perceived risk: fast, inhibited by fatigue, quick decay
-    dPdt = alpha * (C / N) * (1.0 - P) - (delta0 + gamma_F * F) * P
+    dPdt = alpha * (C / N) - (delta0 + gamma_F * F) * P
     #Fatigue: leaky integrator of P with very slow decay
-    dFdt = epsilon * P * (1.0 - F) - phi * F
+    dFdt = epsilon * P - phi * F
 
     return [dSdt, dIdt, dCdt, dRdt, dPdt, dFdt]
 
@@ -76,7 +74,7 @@ def sicr_pf_model(
 
 ###### WRAPPER FOR DASH ######
 def run_sicr_pf(I0=10, N=100_000, beta_0=0.25, gamma=0.1, rho=0.01, alpha=0.1, delta=0.016,
-                             compliance_max=0.6, gamma_F=1, epsilon=0.0083, phi=0.002):
+                             compliance_max=0.8, gamma_F=0.5, epsilon=0.0083, phi=0.004, omega=1/180):
     initial_conditions = [N - I0, I0, 0, 0, 0, 0]   # S0, I0, C0, R0, P0, F0
     t_span = (0, 400)
     t_eval = np.linspace(t_span[0], t_span[1], int((t_span[1] - t_span[0]) * 2) + 1)
@@ -85,7 +83,7 @@ def run_sicr_pf(I0=10, N=100_000, beta_0=0.25, gamma=0.1, rho=0.01, alpha=0.1, d
         sicr_pf_model,
         t_span,
         initial_conditions,
-        args=(N, beta_0, gamma, rho, alpha, delta, compliance_max, gamma_F, epsilon, phi),
+        args=(N, beta_0, gamma, rho, alpha, delta, compliance_max, gamma_F, epsilon, phi, omega),
         t_eval=t_eval,
         method="LSODA"
     )
@@ -239,7 +237,7 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
         ),
         specs=[[{}, {}],
             [{"secondary_y": True}, {}]],
-        horizontal_spacing=0.04,  # tighten the gaps
+        horizontal_spacing=0.04,
         vertical_spacing=0.07
     )
 
@@ -258,10 +256,10 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
     # Plot 2: Risk perception & compliance
     fig.add_trace(go.Scatter(x=t, y=P, mode="lines", name="Risk Perception (P)",
                             line=dict(color="magenta", width=3), showlegend=False), row=1, col=2)
-    fig.add_trace(go.Scatter(x=t, y=compliance, mode="lines", name="Compliance",
-                            line=dict(color="cyan", dash="dash", width=2), showlegend=False), row=1, col=2)
     fig.add_trace(go.Scatter(x=t, y=F, mode="lines", name="Fatigue (F)",
                             line=dict(color="gray", width=3), showlegend=False), row=1, col=2)
+    fig.add_trace(go.Scatter(x=t, y=compliance, mode="lines", name="Compliance",
+                            line=dict(color="cyan", dash="dash", width=2), showlegend=False), row=1, col=2)
     fig.update_yaxes(title_text="Level", row=1, col=2)
 
     # Plot 3: Transmission (left) vs Cases (right)
@@ -285,7 +283,7 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
 
     peak_i_time = float(t[np.argmax(I)])
     peak_c_time = float(t[np.argmax(C)])
-    if peak_c_time < peak_i_time:  # swap if reporting peak earlier (safety)
+    if peak_c_time < peak_i_time:
         peak_i_time, peak_c_time = peak_c_time, peak_i_time
 
     # shaded rect (reporting delay interval)
@@ -303,12 +301,11 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
     fig.update_yaxes(title_text="Cases", row=2, col=2)
     fig.update_xaxes(title_text="Time (days)", row=2, col=2)
 
-    # --- Add framed boxes around subplots and small in-plot legends ---
+    # framed boxes
     for r in (1,2):
         for c in (1,2):
             add_subplot_box(fig, r, c)
 
-    # add tight local legends (top-right inside each plot)
     add_local_legend(fig, 1, 1, [
         ("Susceptible", "royalblue", "solid"),
         ("Infected", "orange", "solid"),
@@ -318,6 +315,7 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
 
     add_local_legend(fig, 1, 2, [
         ("Risk Perception (P)", "magenta", "solid"),
+        ("Fatigue (F)", "gray", "solid"),
         ("Compliance", "cyan", "dash"),
     ], x_right=0.97, y_top=0.95, font_size=13)
 
@@ -334,8 +332,7 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
         ("Reporting delay", "gray", "solid"),
     ], x_right=0.97, y_top=0.95, font_size=13)
 
-    # --- Fix grids & ticks (apply consistent tick positions based on t) ---
-    # Use explicit tickvals computed above so vertical gridlines align across subplots.
+    # grid fix
     for r in (1,2):
         for c in (1,2):
             fig.update_xaxes(row=r, col=c,
@@ -346,14 +343,11 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
                             zeroline=False,
                             tickfont=dict(size=11))
 
-    # For the transmission panel (row=2,col=1) ensure the left y-axis provides horizontal gridlines
     fig.update_yaxes(row=2, col=1, secondary_y=True, showgrid=True, gridcolor="lightgray", zeroline=False)
-    # and suppress gridlines from the secondary (right) y-axis so horizontal grid is continuous
     fig.update_yaxes(row=2, col=1, secondary_y=True, showgrid=False, zeroline=False)
 
-    # General axis & layout cosmetics
     fig.update_layout(
-        autosize=True,                    # allow container to control width
+        autosize=True,
         height=920,
         margin=dict(l=50, r=20, t=80, b=50),
         plot_bgcolor="white",
@@ -362,8 +356,6 @@ def plot_sicr_pf_dashboard(t, compartments, meta):
         font=dict(family="Times New Roman", size=13)
     )
 
-
-    # disable Plotly's global legend (we use fake in-plot legends)
     fig.update_yaxes(showgrid=True, gridcolor="lightgray", zeroline=False)
     fig.update_layout(showlegend=False)
 

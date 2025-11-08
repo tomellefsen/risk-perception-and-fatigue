@@ -1,0 +1,63 @@
+fixed:
+  N: 1000000
+
+free_names:
+  # order matters across bounds and code
+  - beta0
+  - gamma
+  - rho
+  - alpha
+  - delta
+  - epsilon
+  - phi
+  - k
+  - compliance_max
+  - beta_floor
+  - rho_obs       # reporting fraction (you can keep a single rho if used both places)
+  - log_theta # NB dispersion (log)
+  - I0
+  - C0
+  - P0
+  - F0
+
+bounds:
+  # (min, max) for each free param, aligned with free_names
+  - [0.05, 1.0]    # beta0
+  - [0.05, 0.5]    # gamma
+  - [0.01, 0.5]    # rho (reporting rate in ODE if used)
+  - [0.0, 2.0]     # alpha
+  - [0.0, 1.0]     # delta
+  - [0.0, 0.5]     # epsilon
+  - [0.0, 0.5]     # phi
+  - [0.5, 8.0]    # k
+  - [0.2, 0.9]     # compliance_max
+  - [0.1, 0.6]     # beta_floor
+  - [0.05, 0.9]    # rho (obs model scale)  <-- if duplicate, remove one occurrence
+  - [-5.0, 5.0]    # log_theta
+  - [1.0, 2000.0]  # I0
+  - [1.0, 2000.0]  # C0
+  - [0.0, 1.0]     # P0
+  - [0.0, 1.0]     # F0
+
+obs:
+  delay_mean: 3.0
+  delay_sd: 2.0
+  delay_maxlag: 14
+
+fit:
+  use_pso: true
+  pso_particles: 20
+  pso_iters: 50
+  local_seeds: 8
+  seed: 123
+
+cv:
+  initial_train: 150
+  horizons: [7, 14, 28]
+  step: 7
+
+profiles:
+  beta0: [0.05, 1.0, 21]
+  k: [0.5, 12.0, 25]
+  alpha: [0.0, 2.0, 21]
+  rho: [0.05, 0.9, 21]
