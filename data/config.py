@@ -1,7 +1,7 @@
 SLICES = [
     {
         'name': 'P1_Épidémie_initiale_et_confinement',
-        'start': '2020-03-01',
+        'start': '2020-03-11',
         'end': '2020-08-31',
         'events': [
             ('2020-03-13', 'Urgence sanitaire', 'red'), 

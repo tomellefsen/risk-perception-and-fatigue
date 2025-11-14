@@ -1,63 +1,78 @@
 fixed:
-  N: 1000000
-
+  N: 8800000 # Quebec's population
+  rho: 0.095 # Average 1-2 weeks report delay, so 1/10.5 days
+  epsilon: 0.25 
+  phi: 0.25
+  compliance_max: 0.8
+  beta_floor: 0.10
 free_names:
-  # order matters across bounds and code
-  - beta0
-  - gamma
-  - rho
-  - alpha
-  - delta
-  - epsilon
-  - phi
-  - k
-  - compliance_max
-  - beta_floor
-  - rho_obs       # reporting fraction (you can keep a single rho if used both places)
-  - log_theta # NB dispersion (log)
-  - I0
-  - C0
-  - P0
-  - F0
+- beta0
+- gamma
+- alpha
+- rho_obs
+- delta
+- k
+- log_theta
+- I0
+- C0
+- P0
+- F0
+- R0
+# These were edited manually after the Morris screening. 
+# Reason being that our fit algorithms require y0 parameters
+# (initial states for I, C, P, F and R) to be provided, and
+# passing them with a unreasonable bound results in a flat
+# surface in the local fit.
 
+# Also arbitrairly fixed compliance_max and beta_floor, 
+# because these parameters are not particularly interesting
+# to study.
+
+# Kept log_theta for model fitting to work through noise.
 bounds:
-  # (min, max) for each free param, aligned with free_names
-  - [0.05, 1.0]    # beta0
-  - [0.05, 0.5]    # gamma
-  - [0.01, 0.5]    # rho (reporting rate in ODE if used)
-  - [0.0, 2.0]     # alpha
-  - [0.0, 1.0]     # delta
-  - [0.0, 0.5]     # epsilon
-  - [0.0, 0.5]     # phi
-  - [0.5, 8.0]    # k
-  - [0.2, 0.9]     # compliance_max
-  - [0.1, 0.6]     # beta_floor
-  - [0.05, 0.9]    # rho (obs model scale)  <-- if duplicate, remove one occurrence
-  - [-5.0, 5.0]    # log_theta
-  - [1.0, 2000.0]  # I0
-  - [1.0, 2000.0]  # C0
-  - [0.0, 1.0]     # P0
-  - [0.0, 1.0]     # F0
-
+- [0.05, 2.0]
+- [0.05, 0.5]
+- [0.0, 2.0]
+- [0.05, 1.0]
+- [0.0, 1.0]
+- [0.5, 8.0]
+- [-5.0, 5.0]
+- [1.0, 100.0]
+- [1.0, 100.0]
+- [0.0, 0.95]
+- [0.0, 1.0]
+- [0.0, 100.0]
 obs:
   delay_mean: 3.0
   delay_sd: 2.0
   delay_maxlag: 14
-
 fit:
   use_pso: true
-  pso_particles: 20
-  pso_iters: 50
+  pso_particles: 100
+  pso_iters: 200
   local_seeds: 8
   seed: 123
-
 cv:
   initial_train: 150
-  horizons: [7, 14, 28]
+  horizons:
+  - 7
+  - 14
+  - 28
   step: 7
-
 profiles:
-  beta0: [0.05, 1.0, 21]
-  k: [0.5, 12.0, 25]
-  alpha: [0.0, 2.0, 21]
-  rho: [0.05, 0.9, 21]
+  beta0:
+  - 0.05
+  - 1.0
+  - 21
+  k:
+  - 0.5
+  - 12.0
+  - 25
+  alpha:
+  - 0.0
+  - 2.0
+  - 21
+  rho:
+  - 0.05
+  - 0.9
+  - 21

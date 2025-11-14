@@ -9,6 +9,7 @@ from src.observation import discrete_gamma_kernel, make_mu_from_model, nb_loglik
 from src.fit import fit_pso_then_local, profile_likelihood
 from src.metrics import mae, rmse, nb_mean_log_pred_density, simulate_nb_intervals
 from src.model import sirc_pf_rhs
+from src.diagnostics import info_criteria_nb
 
 from src.dynamics import (
     dominant_period_days, 
@@ -16,7 +17,6 @@ from src.dynamics import (
     numerical_jacobian_REDUCED,
     sirc_pf_rhs_REDUCED     
 )
-
 
 def build_pars_fn(theta_dict):
     # Map flat theta_dict into 'pars' for the ODE
@@ -57,7 +57,8 @@ def analyze_slice(
     base_outdir: Path,
     delay_w: np.ndarray,
     y0_guess_from_prev: np.ndarray | None = None,
-    fit_params: dict = {}
+    fit_params: dict = {},
+    prev_inc_tail: np.ndarray | None = None,
 ):
     """
     Runs the entire analysis pipeline for a single data slice.
@@ -79,6 +80,14 @@ def analyze_slice(
     T = len(y_obs)
     t_eval = np.arange(T, dtype=float)
     N = float(params["fixed"]["N"])
+    
+    burn = int(params["obs"]["delay_maxlag"])  # 14
+    scoring_mask = np.ones(T, dtype=bool)
+    scoring_mask[:burn] = False
+    
+    # --- Carry-in buffer safeguard (first slice) ---
+    if prev_inc_tail is None:
+        prev_inc_tail = np.zeros(len(delay_w) - 1, dtype=float)
 
     # --- 2. Setup Fit Parameters (NEW LOGIC) ---
     
@@ -160,13 +169,15 @@ def analyze_slice(
         pso_particles=fit_params.get("pso_particles", 60),
         pso_iters=fit_params.get("pso_iters", 300),
         local_seeds=fit_params.get("local_seeds", 8),
-        seed=fit_params.get("seed", 123)
+        seed=fit_params.get("seed", 123),
+        scoring_mask = scoring_mask,
+        prev_inc_tail=prev_inc_tail
     )
     # Save best *free* params
     pd.Series(best["x"], index=current_free_names).to_csv(slice_outdir / "best_params.csv")
     
     # --- 4. Recompute Trajectories for this Slice ---
-    print("  Recomputing best-fit trajectories...")
+    print("  Recomputing best-fit trajectories...") 
     
     # Rebuild the *full* theta dict, combining fixed and fitted params
     theta_best = current_fixed.copy() 
@@ -196,8 +207,8 @@ def analyze_slice(
         return None 
     
     try:
-        rho_report = float(theta_best["rho_obs"])
-        mu, Y_fit, inc = make_mu_from_model(pars, y0_fit, t_eval, delay_w, rho=rho_report)
+        rho_obs = float(theta_best["rho_obs"])
+        mu, Y_fit, inc = make_mu_from_model(pars, y0_fit, t_eval, delay_w, rho_obs)
         pd.DataFrame({"mu":mu, "inc":inc, "y":y_obs}).to_csv(slice_outdir / "fit_series.csv", index=False)
         
         # This is the y0 for the *next* slice
@@ -207,6 +218,39 @@ def analyze_slice(
         print(f"  ERROR: Simulation failed with best-fit params: {e}")
         (slice_outdir / "simulation_error.txt").write_text(str(e))
         return None # Don't pass a bad state to the next slice
+    
+    # Save tail for next slice
+    L = len(delay_w)
+    tail = inc[-(L-1):].copy() if len(inc) >= L-1 else inc.copy()
+    np.savetxt(slice_outdir / "inc_tail.txt", tail)
+    
+    # --- 4b. Diagnostics: NLL per obs, AIC, BIC ---
+
+    # Optional: burn-in mask to ignore delay spillover at the slice head
+    burn = int(params["obs"]["delay_maxlag"])
+    mask = np.ones_like(y_obs, dtype=bool)
+    mask[:burn] = False
+
+    p_params = len(current_free_names)   # number of *fitted* params this slice
+    log_theta_best = float(theta_best["log_theta"])
+
+    diag = info_criteria_nb(
+        y=y_obs,
+        mu=mu,
+        log_theta=log_theta_best,
+        p_params=p_params,
+        mask=mask,
+    )
+
+    # Save and print
+    pd.Series(diag).to_csv(slice_outdir / "diagnostics.csv")
+
+    print(
+        "Diagnostics (masked={}): n={n:.0f}, NLL={nll:.2f}, NLL/n={nll_per_obs:.4f}, "
+        "AIC={AIC:.2f}, BIC={BIC:.2f}, k={k:.0f}".format(
+            "yes" if mask is not None else "no", **diag
+        )
+    )
 
     # --- 5. Profile Likelihoods ---
     print("  Running profile likelihoods...")
@@ -264,7 +308,7 @@ def analyze_slice(
     print("  (Skipping external validation)")
     
     print(f"  Slice {slice_id} complete.")
-    return y_final_state # Pass this to the next slice
+    return y_final_state, tail # Pass this to the next slice
 
 def main():
     # --- Setup output ---
@@ -297,19 +341,21 @@ def main():
 
     # --- Loop and Analyze Each Slice ---
     y0_for_next_slice = None
+    prev_inc_tail = None
     for i, slice_df in enumerate(slice_dataframes):
         
         # Pass the 'fit' sub-dictionary for clarity
         fit_params = params.get("fit", {})
         
-        y0_for_next_slice = analyze_slice(
+        y0_for_next_slice, prev_inc_tail = analyze_slice(
             slice_id=i,
             slice_data_df=slice_df, # <-- NEW: Pass the DataFrame
             params=params,
             base_outdir=base_outdir,
             delay_w=w,
             y0_guess_from_prev=y0_for_next_slice,
-            fit_params=fit_params
+            fit_params=fit_params,
+            prev_inc_tail=prev_inc_tail
         )
 
     print(f"\nDone. All results in {base_outdir}")

@@ -30,38 +30,57 @@ def convolve_incidence_with_delay(incidence: np.ndarray, w: np.ndarray):
         mu[t] = np.dot(incidence[taumin:t+1][::-1], w[:t - taumin + 1])
     return mu
 
+def convolve_with_delay_with_buffer(incidence: np.ndarray, w: np.ndarray, prev_tail: np.ndarray | None = None):
+    """
+    If prev_tail is provided, it must be the last L-1 values of the *previous slice* incidence.
+    We prepend prev_tail to the current incidence, convolve causally, then drop the first (L-1) outputs.
+    """
+    L = len(w)
+    if prev_tail is None or len(prev_tail) != L-1:
+        prev_tail = np.zeros(L-1, dtype=float)
+    inc_ext = np.concatenate([prev_tail, incidence])
+    # reuse your existing causal function on the extended series
+    mu_ext = convolve_incidence_with_delay(inc_ext, w)
+    # keep only outputs aligned with the current slice
+    return mu_ext[(L-1):]
+
 def nb_loglik(y: np.ndarray, mu: np.ndarray, log_theta: float):
     """
     NB parameterization:
       mean = mu > 0
       var  = mu + mu^2/theta  (theta>0)
     Stable log-likelihood; returns scalar log p(y|mu,theta)
+    
+    *** MODIFIED FOR NUMERICAL STABILITY ***
     """
-    mu = np.clip(mu, 1e-9, None)
+    
+    # --- STABILITY FIX ---
+    # 1. Clip log_theta to prevent np.exp() from overflowing
+    #    or theta becoming zero.
+    log_theta = np.clip(log_theta, -50.0, 50.0)
     theta = np.exp(log_theta)
-    # p = theta/(theta+mu); r = theta
-    r = theta
-    p = theta / (theta + mu)
-    # logPMF: lgamma(y+r) - lgamma(r) - lgamma(y+1) + r*log(p) + y*log(1-p)
+    
+    # 2. Clip mu to avoid log(0)
+    mu = np.clip(mu, 1e-9, None)
+    
     y = np.asarray(y, dtype=float)
-    ll = (gammaln(y + r) - gammaln(r) - gammaln(y + 1.0)
-          + r * np.log(p) + y * np.log1p(-p))
+
+    # 3. Use the more stable log-likelihood formulation
+    #    This avoids the (p = theta / (theta+mu)) division
+    ll = (
+        gammaln(y + theta) - gammaln(theta) - gammaln(y + 1.0)
+        + theta * log_theta + y * np.log(mu)
+        - (theta + y) * np.log(theta + mu)
+    )
+    
     return float(np.sum(ll))
 
-def make_mu_from_model(pars, y0, t_eval, delay_w, rho_obs, Y=None, incidence=None):
-    """
-    Convenience: simulate if not provided, convolve with delay, scale by reporting fraction rho.
-    """
+def make_mu_from_model(pars, y0, t_eval, delay_w, rho_obs, 
+                       Y=None, incidence=None, prev_inc_tail=None):
     from .model import simulate
     if (Y is None) or (incidence is None):
         Y, incidence = simulate(pars, y0, t_eval)
-    mu_delay = convolve_incidence_with_delay(incidence, delay_w)
+    # buffered convolution
+    mu_delay = convolve_with_delay_with_buffer(incidence, delay_w, prev_inc_tail)
     mu = rho_obs * mu_delay
-    
-    try:
-        Y, incidence = simulate(pars, y0, t_eval)
-    except Exception as e:
-        # Return signal upward so objective penalizes
-        raise
-
     return mu, Y, incidence
