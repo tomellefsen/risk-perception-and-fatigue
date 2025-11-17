@@ -242,128 +242,10 @@ def negloglik_nb(params_vec, param_names, bounds, fixed,
     
     return final_cost if np.isfinite(final_cost) else 1e50
 
-# In fit.py
 
 def fit_pso_then_local(
-    x0_guess, # <-- This is still the "center" guess
+    x0_guess, # center guess
     param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn,
-    use_pso=True, pso_particles=60, pso_iters=300, local_seeds=8, seed=123, scoring_mask=None, prev_inc_tail=None
-):
-    rng = np.random.default_rng(seed)
-
-    # --- Optional: PSO global search ---
-    seeds = []
-    if use_pso:
-        try:
-            import pyswarms as ps
-            lb = np.array([b[0] for b in bounds], float)
-            ub = np.array([b[1] for b in bounds], float)
-            n_dims = len(bounds)
-
-            # --- NEW: "Selective-Random" Initialization ---
-            init_pos = None
-            if x0_guess is not None:
-                print("  Seeding PSO with 'Selective-Random' cloud.")
-                # x0_guess was already sanitized in run.py
-                
-                # These are the params that MUST be kept safe
-                y0_param_names = {"I0", "C0", "R0", "P0", "F0"}
-                
-                init_pos = np.zeros((pso_particles, n_dims))
-                
-                # Build the swarm column by column
-                for j, name in enumerate(param_names):
-                    
-                    if name in y0_param_names:
-                        # --- This is a y0 param ---
-                        # Keep it in a TIGHT cloud around the anchor
-                        center = x0_guess[j]
-                        # Use very small noise (1% of width)
-                        noise = rng.normal(0.0, 0.01, pso_particles) * (ub[j] - lb[j])
-                        col = np.clip(center + noise, lb[j], ub[j])
-                        # Ensure one particle is EXACTLY the anchor
-                        col[0] = center 
-                        init_pos[:, j] = col
-                        
-                    else:
-                        # --- This is a mechanical param (beta0, alpha, etc.) ---
-                        # Initialize it RANDOMLY across its FULL bounds
-                        col = lb[j] + (ub[j] - lb[j]) * rng.random(pso_particles)
-                        # But set the first "warm" particle to the old value
-                        col[0] = x0_guess[j]
-                        init_pos[:, j] = col
-            
-            # If x0_guess was None (Slice 1), init_pos remains None,
-            # and pyswarms will use its default random initialization.
-            # --- END NEW ---
-
-            def f_pso(X):
-                # (f_pso function is unchanged)
-                return np.array([
-                    negloglik_nb(row, param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask, prev_inc_tail)
-                for row in X
-                ])
-
-            print("Starting PSO global search...") 
-            optimizer = ps.single.GlobalBestPSO(
-                n_particles=pso_particles, dimensions=n_dims,
-                options={"c1":1.4,"c2":1.4,"w":0.6}, 
-                bounds=(lb,ub),
-                init_pos=init_pos # <-- NEW: Pass the hybrid swarm
-            )
-            best_cost, best_pos = optimizer.optimize(f_pso, iters=pso_iters, n_processes=None)
-            print(f"PSO global search complete. Best cost: {best_cost:.4f}") 
-            
-            seeds.append(best_pos)
-            for _ in range(local_seeds-1):
-                noise = rng.normal(0, 0.05, size=n_dims)
-                seeds.append(np.clip(best_pos*(1.0+noise), lb, ub))
-        except Exception as e:
-            print(f"[WARN] PSO skipped due to error: {e}")
-            
-    # --- (Rest of the function is unchanged) ---
-    if not seeds and x0_guess is not None:
-         print("  PSO was skipped, using x0_guess to seed local refinement.")
-         seeds.append(x0_guess)
-         
-    if not seeds:
-        seeds = []
-        for _ in range(local_seeds):
-            seeds.append(np.array([rng.uniform(b[0], b[1]) for b in bounds]))
-
-    best = {"fun": np.inf, "x": None, "res": None}
-    
-    for i, s in enumerate(seeds): 
-        print(f"--- Starting local refinement for seed {i+1}/{len(seeds)} ---")
-        s_sanitized = sanitize_seed(s, bounds)
-        
-        options = {"maxiter": 2000, "ftol": 1e-10, "gtol":1e-8}
-        max_iter = options.get("maxiter", 2000)
-
-        with tqdm(total=max_iter, desc=f"L-BFGS-B Seed {i+1}") as pbar:
-            def callback_fn(xk):
-                pbar.update(1)
-                
-            res = minimize(
-                negloglik_nb, s_sanitized,
-                args=(param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask, prev_inc_tail),
-                method="L-BFGS-B",
-                bounds=bounds,
-                options=options,
-                callback=callback_fn
-            )
-        
-        print(f"Seed {i+1} finished: {res.message}")
-        print(f"  Iterations: {res.nit}")
-        print(f"  Final NLL: {res.fun:.4f}")
-        
-        if res.fun < best["fun"]:
-            best = {"fun": res.fun, "x": res.x, "res": res}
-            
-    return best
-
-def fit_pso_then_local_old(
-    x0_guess, param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn,
     use_pso=True, pso_particles=60, pso_iters=300, local_seeds=8, seed=123, scoring_mask=None, prev_inc_tail=None
 ):
     """
@@ -443,39 +325,66 @@ def fit_pso_then_local_old(
             import pyswarms as ps
             lb = np.array([b[0] for b in bounds], float)
             ub = np.array([b[1] for b in bounds], float)
+            n_dims = len(bounds)
 
-            # Seeding for the PSO swarm
+            # "Selective-Random" initialization
             init_pos = None
             if x0_guess is not None:
-                print("  Seeding one PSO particle with x0_guess.")
-                # Create a swarm of random particles
-                init_pos = lb + (ub - lb) * rng.random((pso_particles, len(bounds)))
-                # Replace the first particle with the "warm start"
-                init_pos[0] = sanitize_seed(x0_guess, bounds) # Re-sanitize just in case
+                print("  Seeding PSO with 'Selective-Random' cloud.")
+                # x0_guess was already sanitized in run.py
                 
+                # These are the params that MUST be kept safe
+                y0_param_names = {"I0", "C0", "R0", "P0", "F0"}
+                
+                init_pos = np.zeros((pso_particles, n_dims))
+                
+                # Build the swarm
+                for j, name in enumerate(param_names):
+                    
+                    if name in y0_param_names:
+                        # Keep y0 params in a tight cloud around the anchor
+                        center = x0_guess[j]
+                        # Use very small noise (1% of width)
+                        noise = rng.normal(0.0, 0.01, pso_particles) * (ub[j] - lb[j])
+                        col = np.clip(center + noise, lb[j], ub[j])
+                        # Ensure one particle is exactly the anchor
+                        col[0] = center 
+                        init_pos[:, j] = col
+                        
+                    else:
+                        # Initialize mechanical params randomly across its full bounds
+                        col = lb[j] + (ub[j] - lb[j]) * rng.random(pso_particles)
+                        # But set the first "warm" particle to the old value
+                        col[0] = x0_guess[j]
+                        init_pos[:, j] = col
+            
+            # If x0_guess was None (Slice 1), init_pos remains None,
+            # and pyswarms will use its default random initialization.
+
             def f_pso(X):
-                # X shape: (n_particles, n_dims)
                 return np.array([
-                    negloglik_nb(row, param_names, bounds, fixed, t_eval, y_obs, delay_w, 
-                                 y0_template, build_pars_fn, scoring_mask, prev_inc_tail)
+                    negloglik_nb(row, param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask, prev_inc_tail)
                 for row in X
                 ])
 
             print("Starting PSO global search...") 
-            optimizer = ps.single.GlobalBestPSO(n_particles=pso_particles, dimensions=len(bounds),
-                                                options={"c1":1.4,"c2":1.4,"w":0.6}, bounds=(lb,ub), 
-                                                init_pos=init_pos)
+            optimizer = ps.single.GlobalBestPSO(
+                n_particles=pso_particles, dimensions=n_dims,
+                options={"c1":1.4,"c2":1.4,"w":0.6}, 
+                bounds=(lb,ub),
+                init_pos=init_pos
+            )
             best_cost, best_pos = optimizer.optimize(f_pso, iters=pso_iters, n_processes=None)
             print(f"PSO global search complete. Best cost: {best_cost:.4f}") 
             
             seeds.append(best_pos)
             for _ in range(local_seeds-1):
-                noise = rng.normal(0, 0.05, size=len(bounds))
+                noise = rng.normal(0, 0.05, size=n_dims)
                 seeds.append(np.clip(best_pos*(1.0+noise), lb, ub))
         except Exception as e:
             print(f"[WARN] PSO skipped due to error: {e}")
-
-    ###### 2. Local refinement seeds ######
+           
+    ###### 2. Local refinement seeds ###### 
     if not seeds and x0_guess is not None:
          print("  PSO was skipped, using x0_guess to seed local refinement.")
          seeds.append(x0_guess)
@@ -489,9 +398,7 @@ def fit_pso_then_local_old(
     best = {"fun": np.inf, "x": None, "res": None}
     
     for i, s in enumerate(seeds): 
-        
         print(f"--- Starting local refinement for seed {i+1}/{len(seeds)} ---")
-        
         s_sanitized = sanitize_seed(s, bounds)
         
         options = {"maxiter": 2000, "ftol": 1e-10, "gtol":1e-8}
@@ -500,14 +407,14 @@ def fit_pso_then_local_old(
         with tqdm(total=max_iter, desc=f"L-BFGS-B Seed {i+1}") as pbar:
             def callback_fn(xk):
                 pbar.update(1)
-
+                
             res = minimize(
-                negloglik_nb, s_sanitized, 
+                negloglik_nb, s_sanitized,
                 args=(param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask, prev_inc_tail),
                 method="L-BFGS-B",
                 bounds=bounds,
                 options=options,
-                callback=callback_fn 
+                callback=callback_fn
             )
         
         print(f"Seed {i+1} finished: {res.message}")
