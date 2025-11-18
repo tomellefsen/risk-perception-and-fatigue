@@ -112,12 +112,7 @@ def analyze_slice(
     params: dict,
     base_outdir: Path,
     delay_w: np.ndarray,
-    y0_guess_from_prev: np.ndarray | None = None,
-    fit_params: dict = {},
-    prev_inc_tail: np.ndarray | None = None,
-    # --- NEW: Accept previous fit results ---
-    prev_best_fit_params_vec: np.ndarray | None = None,
-    prev_best_fit_param_names: list[str] | None = None
+    fit_params: dict = {}
 ):
     """Runs the entire analysis pipeline for a single data slice.
 
@@ -193,9 +188,6 @@ def analyze_slice(
     burn = int(params["obs"]["delay_maxlag"])
     scoring_mask = np.ones(T, dtype=bool)
     scoring_mask[:burn] = False
-    
-    if prev_inc_tail is None:
-        prev_inc_tail = np.zeros(len(delay_w) - 1, dtype=float)
 
     # Parameters for soft hands-off logic
     current_free_names = list(params["free_names"])
@@ -204,59 +196,12 @@ def analyze_slice(
     current_fixed = params["fixed"].copy()
     current_fixed["obs"] = params["obs"]
     
-    ###### 3. Soft hands-off to next slice ######
-    # uses the y0_anchor_weight for penalty from params.yaml, default to 100.0 ---
-    current_fixed["y0_anchor_weight"] = fit_params.get("y0_anchor_weight", 100.0) 
-    
-    y0_template = {"S0": N, "R0": 0.0} 
-    
-    if y0_guess_from_prev is None:
-        print("  Slice 1: Fitting initial conditions freely.")
-    else:
-        print(f"  Slice {slice_id+1}: Anchoring initial conditions to previous slice's end-state.")
-        current_fixed["I0_anchor"] = float(y0_guess_from_prev[1])
-        current_fixed["C0_anchor"] = float(y0_guess_from_prev[2])
-        current_fixed["R0_anchor"] = float(y0_guess_from_prev[3])
-        current_fixed["P0_anchor"] = float(y0_guess_from_prev[4])
-        current_fixed["F0_anchor"] = float(y0_guess_from_prev[5])
-        
-        print(f"  Anchoring y0 params to: "
-              f"I0={current_fixed.get('I0_anchor'):.2f}, C0={current_fixed.get('C0_anchor'):.2f}, "
-              f"R0={current_fixed.get('R0_anchor'):.2f}, P0={current_fixed.get('P0_anchor'):.4f}, "
-              f"F0={current_fixed.get('F0_anchor'):.4f}")
-        print(f"  Fitting all {len(current_free_names)} free params: {current_free_names}")
+    y0_template = {"S0": N, "R0": 0.0}
+    print(f"  Fitting all {len(current_free_names)} free params independently: {current_free_names}")
 
     ###### 4. Warm start for PSO using last slice parameters ######
     x0_guess_for_fit = None
     use_pso_for_fit = fit_params.get("use_pso", True) 
-
-    if y0_guess_from_prev is not None and prev_best_fit_params_vec is not None:
-        print("  Using previous slice's best-fit params to seed PSO.")
-        
-        # Create a dict of the previous fit
-        prev_best_fit_dict = dict(zip(prev_best_fit_param_names, prev_best_fit_params_vec))
-        
-        # Build the guess vector for the current free params
-        x0_guess_dict = {}
-        for k in current_free_names:
-            if k in prev_best_fit_dict:
-                x0_guess_dict[k] = prev_best_fit_dict[k]
-        
-        # Override with the y0 anchors (they are more up-to-date)
-        x0_guess_dict.update({
-            "I0": current_fixed.get("I0_anchor"),
-            "C0": current_fixed.get("C0_anchor"),
-            "R0": current_fixed.get("R0_anchor"),
-            "P0": current_fixed.get("P0_anchor"),
-            "F0": current_fixed.get("F0_anchor"),
-        })
-
-        # Build the vector in the correct order, using None for any missing
-        x0_guess_vec = [x0_guess_dict.get(k, None) for k in current_free_names]
-        
-        # Sanitize this guess before passing it to the fitter
-        x0_guess_for_fit = sanitize_seed(x0_guess_vec, current_bounds)
-
 
     ###### 5. Model fit ######
     print("  Fitting model...")
@@ -273,8 +218,7 @@ def analyze_slice(
         pso_iters=fit_params.get("pso_iters", 300),
         local_seeds=fit_params.get("local_seeds", 8),
         seed=fit_params.get("seed", 123),
-        scoring_mask = scoring_mask,
-        prev_inc_tail=prev_inc_tail
+        scoring_mask = scoring_mask
     )
     pd.Series(best["x"], index=current_free_names).to_csv(slice_outdir / "best_params.csv")
     
@@ -299,7 +243,7 @@ def analyze_slice(
     
     if not np.all(np.isfinite(y0_fit)):
         print(f"  ERROR: Non-finite y0 created. Skipping simulation.")
-        return None, prev_inc_tail, None, None
+        return None
     
     # Rebuild kernel if it was a free parameter
     local_delay_w = delay_w 
@@ -316,20 +260,18 @@ def analyze_slice(
         )
     
     try:
-        mu, Y_fit, inc, next_tail = make_mu_from_model(
+        mu, Y_fit, inc = make_mu_from_model(
             pars, y0_fit, t_eval, 
             delay_w=local_delay_w,
-            rho_obs=theta_best["rho_obs"], 
-            prev_inc_tail=prev_inc_tail
+            rho_obs=theta_best["rho_obs"]
         )
         pd.DataFrame({"mu":mu, "inc":inc, "y":y_obs}).to_csv(slice_outdir / "fit_series.csv", index=False)
-        np.savetxt(slice_outdir / "inc_tail.txt", next_tail)
         y_final_state = Y_fit[-1] 
     
     except Exception as e:
         print(f"  ERROR: Simulation failed with best-fit params: {e}")
         (slice_outdir / "simulation_error.txt").write_text(str(e))
-        return None, prev_inc_tail, None, None
+        return None
     
     ###### 7. Run diagnostics ######
     burn = int(params["obs"]["delay_maxlag"])
@@ -355,27 +297,26 @@ def analyze_slice(
     )
 
     ###### 8. Run Profile likelyhoods ######
-    #print("  Running profile likelihoods...")
-    #print("  Running profile likelihoods...")
-    #profile_params = params.get("profiles", {})
-    #if not profile_params:
-    #    print("  No profiles defined in params.yaml, skipping.")
+    print("  Running profile likelihoods...")
+    profile_params = params.get("profiles", {})
+    if not profile_params:
+        print("  No profiles defined in params.yaml, skipping.")
         
-    #for pname, grid in profile_params.items():
-    #    if pname not in current_free_names:
-    #        print(f"  Skipping profile for '{pname}' (it is fixed for this slice).")
-    #        continue 
+    for pname, grid in profile_params.items():
+        if pname not in current_free_names:
+            print(f"  Skipping profile for '{pname}' (it is fixed for this slice).")
+            continue 
             
-    #    print(f"  Profiling '{pname}'...")
-    #    g = np.linspace(grid[0], grid[1], grid[2])
-    #    G, Fvals, Xs = profile_likelihood(
-    #        pname, g, best,
-    #        current_free_names,
-    #        current_bounds,
-     #       current_fixed,
-     #       t_eval, y_obs, local_delay_w, y0_template, build_pars_fn
-     #   )
-     #   pd.DataFrame({"param":pname, "grid":G, "negloglik":Fvals}).to_csv(slice_outdir / f"profile_{pname}.csv", index=False)
+        print(f"  Profiling '{pname}'...")
+        g = np.linspace(grid[0], grid[1], grid[2])
+        G, Fvals, Xs = profile_likelihood(
+            pname, g, best,
+            current_free_names,
+            current_bounds,
+            current_fixed,
+            t_eval, y_obs, local_delay_w, y0_template, build_pars_fn
+        )
+        pd.DataFrame({"param":pname, "grid":G, "negloglik":Fvals}).to_csv(slice_outdir / f"profile_{pname}.csv", index=False)
 
     ###### 9. Runs stability analysis ######
     print("  Running oscillation diagnostics...")
@@ -403,7 +344,7 @@ def analyze_slice(
     
     print(f"  Slice {slice_id+1} complete.")
 
-    return y_final_state, next_tail, best["x"], current_free_names
+    return True
 
 
 
@@ -464,12 +405,6 @@ def main():
     except Exception as e:
         print(f"Error loading data: {e}")
         return
-
-    # Loop and analyze each slice
-    y0_for_next_slice = None
-    prev_inc_tail = None
-    prev_best_fit_vec = None
-    prev_param_names = None 
     
     ###### MAIN LOOP ######
     for i, slice_df in enumerate(slice_dataframes):
@@ -477,20 +412,16 @@ def main():
         # Pass the fit sub-dictionary for clarity
         fit_params = params.get("fit", {})
         
-        y0_for_next_slice, prev_inc_tail, prev_best_fit_vec, prev_param_names = analyze_slice(
+        analysis_success = analyze_slice(
             slice_id=i,
             slice_data_df=slice_df,
             params=params,
             base_outdir=base_outdir,
             delay_w=w,
-            y0_guess_from_prev=y0_for_next_slice,
-            fit_params=fit_params,
-            prev_inc_tail=prev_inc_tail,
-            prev_best_fit_params_vec=prev_best_fit_vec,
-            prev_best_fit_param_names=prev_param_names
+            fit_params=fit_params
         )
 
-        if y0_for_next_slice is None:
+        if analysis_success is None:
             print(f"CRITICAL ERROR: Slice {i+1} failed to fit. Stopping analysis.")
             break
         

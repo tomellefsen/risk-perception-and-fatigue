@@ -75,7 +75,7 @@ def sanitize_seed(x, bounds, eps_frac=1e-6):
     
 def negloglik_nb(params_vec, param_names, bounds, fixed, 
                  t_eval, y_obs, delay_w, y0_template, build_pars_fn,
-                 scoring_mask=None, prev_inc_tail=None):
+                 scoring_mask=None):
     """
     The primary objective function: negative log-likelihood (NLL) for Negative B
     inomial (NB) model. It takes a vector of free parameters, combines them with 
@@ -177,9 +177,8 @@ def negloglik_nb(params_vec, param_names, bounds, fixed,
             L  = int(delay_cfg.get("delay_maxlag", 14))
             delay_w = discrete_gamma_kernel_cached(dm, sd, L)          
         
-        mu, _, incidence, next_tail = make_mu_from_model(
-            pars, y0, t_eval, delay_w, rho_obs,
-            prev_inc_tail=prev_inc_tail
+        mu, _, incidence, = make_mu_from_model(
+            pars, y0, t_eval, delay_w, rho_obs
         )
     
     except Exception as e:
@@ -217,37 +216,16 @@ def negloglik_nb(params_vec, param_names, bounds, fixed,
         
     ###### 6. Calculate the negative log-likelihood ######
     ll = nb_loglik(y_use, mu_use, log_theta=log_theta)
-    
-    ###### 7. soft hands-off with penalty ######
-    y0_penalty = 0.0
-    anchor_weight = float(fixed.get("y0_anchor_weight", 0.0))
-    
-    if anchor_weight > 0:
-        # Check for each anchor and add penalty if it exists
-        if "I0_anchor" in fixed:
-            y0_penalty += (theta["I0"] - fixed["I0_anchor"])**2
-        if "C0_anchor" in fixed:
-            y0_penalty += (theta["C0"] - fixed["C0_anchor"])**2
-        if "R0_anchor" in fixed:
-            y0_penalty += (theta["R0"] - fixed["R0_anchor"])**2
-        if "P0_anchor" in fixed:
-            y0_penalty += (theta["P0"] - fixed["P0_anchor"])**2
-        if "F0_anchor" in fixed:
-            y0_penalty += (theta["F0"] - fixed["F0_anchor"])**2
-            
-        y0_penalty *= anchor_weight
 
-    ###### 8. final cost ######
-    final_cost = (-ll + pen + y0_penalty)
+    ###### 7. final cost ######
+    final_cost = (-ll + pen)
     
     return final_cost if np.isfinite(final_cost) else 1e50
 
 
 def fit_pso_then_local(
-    x0_guess, # center guess
-    param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn,
-    use_pso=True, pso_particles=60, pso_iters=300, local_seeds=8, seed=123, scoring_mask=None, prev_inc_tail=None
-):
+    x0_guess, param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn,
+    use_pso=True, pso_particles=60, pso_iters=300, local_seeds=8, seed=123, scoring_mask=None):
     """
     Fits model parameters using global Particles Swarm Optimization (PSO) 
     then local Box constraints Limited-memory Broyden-Fletcher-Goldfarb-Shanno 
@@ -325,66 +303,39 @@ def fit_pso_then_local(
             import pyswarms as ps
             lb = np.array([b[0] for b in bounds], float)
             ub = np.array([b[1] for b in bounds], float)
-            n_dims = len(bounds)
 
-            # "Selective-Random" initialization
+            # Seeding for the PSO swarm
             init_pos = None
             if x0_guess is not None:
-                print("  Seeding PSO with 'Selective-Random' cloud.")
-                # x0_guess was already sanitized in run.py
+                print("  Seeding one PSO particle with x0_guess.")
+                # Create a swarm of random particles
+                init_pos = lb + (ub - lb) * rng.random((pso_particles, len(bounds)))
+                # Replace the first particle with the "warm start"
+                init_pos[0] = sanitize_seed(x0_guess, bounds) # Re-sanitize just in case
                 
-                # These are the params that MUST be kept safe
-                y0_param_names = {"I0", "C0", "R0", "P0", "F0"}
-                
-                init_pos = np.zeros((pso_particles, n_dims))
-                
-                # Build the swarm
-                for j, name in enumerate(param_names):
-                    
-                    if name in y0_param_names:
-                        # Keep y0 params in a tight cloud around the anchor
-                        center = x0_guess[j]
-                        # Use very small noise (1% of width)
-                        noise = rng.normal(0.0, 0.01, pso_particles) * (ub[j] - lb[j])
-                        col = np.clip(center + noise, lb[j], ub[j])
-                        # Ensure one particle is exactly the anchor
-                        col[0] = center 
-                        init_pos[:, j] = col
-                        
-                    else:
-                        # Initialize mechanical params randomly across its full bounds
-                        col = lb[j] + (ub[j] - lb[j]) * rng.random(pso_particles)
-                        # But set the first "warm" particle to the old value
-                        col[0] = x0_guess[j]
-                        init_pos[:, j] = col
-            
-            # If x0_guess was None (Slice 1), init_pos remains None,
-            # and pyswarms will use its default random initialization.
-
             def f_pso(X):
+                # X shape: (n_particles, n_dims)
                 return np.array([
-                    negloglik_nb(row, param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask, prev_inc_tail)
+                    negloglik_nb(row, param_names, bounds, fixed, t_eval, y_obs, delay_w, 
+                                 y0_template, build_pars_fn, scoring_mask)
                 for row in X
                 ])
 
             print("Starting PSO global search...") 
-            optimizer = ps.single.GlobalBestPSO(
-                n_particles=pso_particles, dimensions=n_dims,
-                options={"c1":1.4,"c2":1.4,"w":0.6}, 
-                bounds=(lb,ub),
-                init_pos=init_pos
-            )
+            optimizer = ps.single.GlobalBestPSO(n_particles=pso_particles, dimensions=len(bounds),
+                                                options={"c1":1.4,"c2":1.4,"w":0.6}, bounds=(lb,ub), 
+                                                init_pos=init_pos)
             best_cost, best_pos = optimizer.optimize(f_pso, iters=pso_iters, n_processes=None)
             print(f"PSO global search complete. Best cost: {best_cost:.4f}") 
             
             seeds.append(best_pos)
             for _ in range(local_seeds-1):
-                noise = rng.normal(0, 0.05, size=n_dims)
+                noise = rng.normal(0, 0.05, size=len(bounds))
                 seeds.append(np.clip(best_pos*(1.0+noise), lb, ub))
         except Exception as e:
             print(f"[WARN] PSO skipped due to error: {e}")
-           
-    ###### 2. Local refinement seeds ###### 
+
+    ###### 2. Local refinement seeds ######
     if not seeds and x0_guess is not None:
          print("  PSO was skipped, using x0_guess to seed local refinement.")
          seeds.append(x0_guess)
@@ -398,7 +349,9 @@ def fit_pso_then_local(
     best = {"fun": np.inf, "x": None, "res": None}
     
     for i, s in enumerate(seeds): 
+        
         print(f"--- Starting local refinement for seed {i+1}/{len(seeds)} ---")
+        
         s_sanitized = sanitize_seed(s, bounds)
         
         options = {"maxiter": 2000, "ftol": 1e-10, "gtol":1e-8}
@@ -407,14 +360,14 @@ def fit_pso_then_local(
         with tqdm(total=max_iter, desc=f"L-BFGS-B Seed {i+1}") as pbar:
             def callback_fn(xk):
                 pbar.update(1)
-                
+
             res = minimize(
-                negloglik_nb, s_sanitized,
-                args=(param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask, prev_inc_tail),
+                negloglik_nb, s_sanitized, 
+                args=(param_names, bounds, fixed, t_eval, y_obs, delay_w, y0_template, build_pars_fn, scoring_mask),
                 method="L-BFGS-B",
                 bounds=bounds,
                 options=options,
-                callback=callback_fn
+                callback=callback_fn 
             )
         
         print(f"Seed {i+1} finished: {res.message}")

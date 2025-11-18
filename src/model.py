@@ -176,4 +176,5 @@ def simulate(pars, y0, t_eval, rtol=1e-7, atol=1e-9):
     # incidence_day[t] ≈ max(S[t-1]-S[t], 0)
     
     inc = np.maximum(-np.diff(S, prepend=S[0]), 0.0)
+    
     return Y, inc

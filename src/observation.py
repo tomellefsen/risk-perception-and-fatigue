@@ -96,44 +96,6 @@ def convolve_incidence_with_delay(incidence: np.ndarray, w: np.ndarray):
         
     return mu
 
-
-def convolve_with_delay_with_buffer(incidence: np.ndarray, w: np.ndarray, prev_tail: np.ndarray | None = None):
-    """
-    Causal convolution that handles buffers for time-slice hand-offs.
-
-    When fitting in time slices, the convolution at the start of a slice
-    needs to "know about" the incidence from the *end* of the previous
-    slice.
-
-    Prepends `prev_tail` (the last L-1 incidence values from the previous slice) 
-    to the current `incidence` before convolving. It then returns only the 
-    convolved values that align with the current `incidence` array, ensuring 
-    a "warmed-up" and continuous convolution across slice boundaries.
-
-    Parameters
-    ----------
-    incidence : np.ndarray
-        The incidence for the *current* slice.
-    w : np.ndarray
-        The delay kernel. `L = len(w)`.
-    prev_tail : np.ndarray or None
-        The last `L-1` incidence values from the *previous* slice.
-        If None or wrong length, a zero-buffer is used.
-
-    Returns
-    -------
-    np.ndarray
-        The properly buffered convolved mean `mu` for the current slice.
-
-    """
-    L = len(w)
-    if prev_tail is None or len(prev_tail) != L-1:
-        prev_tail = np.zeros(L-1, dtype=float)
-    inc_ext = np.concatenate([prev_tail, incidence])
-    mu_ext = convolve_incidence_with_delay(inc_ext, w)
-    
-    return mu_ext[(L-1):]
-
 # -----------------------------------
 # END OF HELPERS
 # -----------------------------------
@@ -237,8 +199,9 @@ def nb_loglik(y: np.ndarray, mu: np.ndarray, log_theta: float):
     
     return float(np.sum(ll))
 
+
 def make_mu_from_model(pars, y0, t_eval, delay_w, rho_obs, 
-                       Y=None, incidence=None, prev_inc_tail=None):
+                       Y=None, incidence=None):
     """
     Runs the full observation pipeline: simulate, convolve, and scale.
     1.  Calls `model.simulate` to get `Y` (states) and `incidence`
@@ -282,13 +245,9 @@ def make_mu_from_model(pars, y0, t_eval, delay_w, rho_obs,
     """
     if (Y is None) or (incidence is None):
         Y, incidence = simulate(pars, y0, t_eval)
-    # buffered convolution
-    mu_delay = convolve_with_delay_with_buffer(incidence, delay_w, prev_inc_tail)
+
+    mu_delay = convolve_incidence_with_delay(incidence, delay_w)
     mu = rho_obs * mu_delay
     mu = np.maximum(mu, 1e-12)  # numeric safety
     
-    # hand off the last L-1 incidences to the next slice
-    L = len(delay_w)
-    next_tail = incidence[-(L-1):].copy() if L > 1 else np.empty(0, dtype=float)
-    
-    return mu, Y, incidence, next_tail
+    return mu, Y, incidence
