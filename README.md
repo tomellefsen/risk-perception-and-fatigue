@@ -1,4 +1,4 @@
-Repository for the `Fear-Fatigue`, presented in the context of our integration project course *201-EYF-03 Projet en mathématiques*, H25, in the *Sciences de la nature* program at Cegep de l'Outaouais, supervised by Prof. Olivier Rousseau.
+Repository for the `Fear-Fatigue` behavioural model, presented in the context of our integration project course *201-EYF-03 Projet en mathématiques*, H25, in the *Sciences de la nature* program at Cégep de l'Outaouais, supervised by Prof. Olivier Rousseau.
 
 This repository contains several sub-directories:
 1. **dash_app**: an interactive web dashboard for visualizing model behaviours and model parameter impact.
